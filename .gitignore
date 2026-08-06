@@ -1,0 +1,23 @@
+# Vivado generated output -- all regenerable from sources + xpr
+AMBA_arbiter_rev.cache/
+AMBA_arbiter_rev.runs/
+AMBA_arbiter_rev.sim/
+AMBA_arbiter_rev.hw/
+AMBA_arbiter_rev.ip_user_files/
+AMBA_arbiter_rev.srcs/utils_1/
+
+# Out-of-context characterization output
+ooc_out/
+ooc_out_change2/
+
+# Vivado journals, logs, scratch
+*.jou
+*.log
+*.str
+.Xil/
+
+# LaTeX build products
+*.aux
+*.toc
+*.out
+*.synctex.gz

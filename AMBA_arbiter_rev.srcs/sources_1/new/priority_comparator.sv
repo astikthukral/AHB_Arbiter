@@ -1,25 +1,25 @@
 // -----------------------------------------------------------------------------
-// priority_comparator  (spec §3 — Priority comparison logic)
+// priority_comparator  (spec ï¿½3 ï¿½ Priority comparison logic)
 //
 // Purely combinational. Evaluated only on Priority slots, over *currently
-// requesting masters only* — a non-requesting master is never a candidate,
+// requesting masters only* ï¿½ a non-requesting master is never a candidate,
 // regardless of its priority value.
 //
 // It finds the maximum priority value among requesters and reports:
 //   - `any_req`          : at least one master is requesting this cycle.
 //   - `tied_mask`        : the set of requesters whose priority equals the max.
-//   - `is_tie`           : two or more requesters share that max value (§3a is
+//   - `is_tie`           : two or more requesters share that max value (ï¿½3a is
 //                          engaged by the top level).
 //   - `unique_valid`     : exactly one requester holds the strict max.
 //   - `direct_grant_vec` : one-hot grant for that unique max (valid only when
 //                          `unique_valid`); all-zero otherwise.
 //
-// When `is_tie`, `tied_mask` is handed to tie_break_rr_unit (§3a) to pick the
+// When `is_tie`, `tied_mask` is handed to tie_break_rr_unit (ï¿½3a) to pick the
 // winner. When exactly one master holds the max, `tied_mask` is itself already
 // one-hot and equals `direct_grant_vec`. There is no separate "full tie" case:
 // a tie whose membership happens to equal all requesters is still just a tie.
 //
-// This block never reads or writes the main RR pointer's state (§3/§8.3).
+// This block never reads or writes the main RR pointer's state (ï¿½3/ï¿½8.3).
 //
 // Implementation: a balanced O(log2 NUM_MASTERS)-deep pairwise reduction tree,
 // not two sequential O(NUM_MASTERS) folds (find-max, then find-who's-tied).
@@ -39,7 +39,7 @@
 // carries (req, pri, mask) for its subrange, flattened into per-level bit
 // vectors the same way pri_flat/tied_mask already are elsewhere in this
 // design (node i's slice at bit offset i*WIDTH). Merging two nodes keeps the
-// higher-priority side outright, or unions the masks on an exact tie — so the
+// higher-priority side outright, or unions the masks on an exact tie ï¿½ so the
 // final root node's mask/req are identical to what the old fold computed,
 // just produced in log2(N) levels instead of ~2*N.
 // -----------------------------------------------------------------------------
@@ -54,14 +54,14 @@ module priority_comparator #(
     output logic [NUM_MASTERS-1:0]            direct_grant_vec, // one-hot when unique max
     output logic                              unique_valid,     // exactly one master at max
     output logic                              is_tie,           // >= 2 masters at max
-    output logic [NUM_MASTERS-1:0]            tied_mask,        // requesters at max (subset for §3a)
+    output logic [NUM_MASTERS-1:0]            tied_mask,        // requesters at max (subset for ï¿½3a)
     output logic                              any_req
 );
 
     localparam int LEVELS = (NUM_MASTERS <= 1) ? 0 : $clog2(NUM_MASTERS);
 
     // Elaboration-time-only helper: how many live nodes remain at a given
-    // level (level 0 = NUM_MASTERS leaves, halving — rounded up — each level).
+    // level (level 0 = NUM_MASTERS leaves, halving ï¿½ rounded up ï¿½ each level).
     // Only ever called with genvar/localparam arguments below, so every call
     // resolves to a constant at elaboration; it generates no hardware itself.
     function automatic int count_at_level(input int level);
@@ -133,8 +133,8 @@ module priority_comparator #(
     assign any_req   = req_lvl[LEVELS][0];
     assign tied_mask = mask_lvl[LEVELS][0 +: NUM_MASTERS];
 
-    assign is_tie       = any_req && ($countones(tied_mask) >= 2);
-    assign unique_valid = any_req && ($countones(tied_mask) == 1);
+     assign is_tie       = |(tied_mask & (tied_mask - 1'b1));
+    assign unique_valid = any_req && !is_tie;
 
     // Unique max: tied_mask is already one-hot and IS the grant. Otherwise none.
     assign direct_grant_vec = unique_valid ? tied_mask : '0;

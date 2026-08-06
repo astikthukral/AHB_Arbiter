@@ -19,9 +19,9 @@
 // 
 //////////////////////////////////////////////////////////////////////////////////
 // -----------------------------------------------------------------------------
-// amba_arbiter_top  (spec §9 — Top-level integration)
+// amba_arbiter_top  (Top-level integration)
 //
-// Integrates §1-§8 into the complete AMBA-style arbiter:
+// Integrates ï¿½1-ï¿½8 into the complete AMBA-style arbiter:
 //   Round-Robin + Priority + Lock-Override, with a grace window for abandoned
 //   grants. Routes REQ/PRI/LOCK/VALID_XFER (and the protocol completion signal),
 //   instantiates every sub-module, and muxes the final one-hot GRANT based on
@@ -29,23 +29,23 @@
 //
 // Grant selection each cycle:
 //   RR slot       : GRANT = rr_pointer_unit's rotate/mask grant over REQ.
-//   PRIORITY slot : GRANT = unique max requester, or — on a tie — tie_break_rr's
+//   PRIORITY slot : GRANT = unique max requester, or ï¿½ on a tie ï¿½ tie_break_rr's
 //                   grant over the tied-at-max subset.
-//   Locked        : GRANT = the lock holder, regardless of the above (§5).
+//   Locked        : GRANT = the lock holder, regardless of the above (ï¿½5).
 //
 // Completion / advance:
 //   genuine_complete = the granted master's COMPLETE, *suppressed while it is
 //                      still asserting LOCK* so intermediate beats of a locked
-//                      sequence do not end the slot — the sequence ends only when
-//                      LOCK drops and COMPLETE asserts (§5).
-//   slot_complete    = genuine_complete | grace forced_complete (§5a).
-//   On slot_complete the granting pointer/counter advances (§2/§3a/§4): RR slot
+//                      sequence do not end the slot ï¿½ the sequence ends only when
+//                      LOCK drops and COMPLETE asserts (ï¿½5).
+//   slot_complete    = genuine_complete | grace forced_complete (ï¿½5a).
+//   On slot_complete the granting pointer/counter advances (ï¿½2/ï¿½3a/ï¿½4): RR slot
 //   -> rr_ptr; PRIORITY slot & tie -> tie_ptr; unique-max -> neither pointer,
 //   only the alternation toggles. For a locked slot the latched tie-ness
 //   (lock_via_tie) steers which pointer advances, since the live priority
 //   landscape may have changed by the completing cycle.
 //
-// Standing assumptions carried from §8: within a single (non-locked) transfer a
+// Standing assumptions carried from ï¿½8: within a single (non-locked) transfer a
 // master keeps REQ/PRI stable until it completes; combined with the pointers not
 // advancing until completion, the combinational grant is stable across the
 // transfer. LOCK is what holds the grant against *changing* conditions.
@@ -54,7 +54,7 @@
 module amba_arbiter_top #(
     parameter int NUM_MASTERS = 4,
     parameter int PRI_WIDTH   = 3,
-    parameter int GRACE_W     = 4,                        // §5a window length
+    parameter int GRACE_W     = 4,                        // ï¿½5a window length
     parameter int PTR_WIDTH   = (NUM_MASTERS <= 1) ? 1 : $clog2(NUM_MASTERS)
 ) (
     input  logic                             clk,
@@ -63,7 +63,7 @@ module amba_arbiter_top #(
     input  logic [NUM_MASTERS-1:0]           REQ,         // request lines
     input  logic [NUM_MASTERS*PRI_WIDTH-1:0] PRI,         // per-master priority, packed
     input  logic [NUM_MASTERS-1:0]           LOCK,        // lock-hold request per master
-    input  logic [NUM_MASTERS-1:0]           VALID_XFER,  // transfer-started per master (§5a)
+    input  logic [NUM_MASTERS-1:0]           VALID_XFER,  // transfer-started per master (ï¿½5a)
     input  logic [NUM_MASTERS-1:0]           COMPLETE,    // genuine transfer/beat completion
 
     output logic [NUM_MASTERS-1:0]           GRANT,       // one-hot grant
@@ -99,13 +99,14 @@ module amba_arbiter_top #(
     logic [NUM_MASTERS-1:0] arb_grant;
     logic [NUM_MASTERS-1:0] eff_grant;
 
-    // Priority-slot grant: tie -> §3a winner, otherwise the unique max.
-    assign prio_grant = is_tie ? tie_grant : direct_grant;
+    // Priority-slot grant: tie -> ï¿½3a winner, otherwise the unique max.
+    //assign prio_grant = is_tie ? tie_grant : direct_grant;
 
+    assign prio_grant = tie_grant;
     // Slot-type mux (RR vs PRIORITY), ignoring lock.
     assign arb_grant  = (slot_type == SLOT_RR) ? rr_grant : prio_grant;
 
-    // Lock override has absolute precedence (§5).
+    // Lock override has absolute precedence (ï¿½5).
     assign eff_grant  = locked ? lock_grant_vec : arb_grant;
     assign GRANT      = eff_grant;
 
@@ -121,10 +122,10 @@ module amba_arbiter_top #(
     assign genuine_raw      = |(COMPLETE & GRANT);
     assign lock_now         = |(LOCK    & GRANT);
     // Suppress genuine completion while LOCK is asserted: the locked sequence ends
-    // only once LOCK drops and the final COMPLETE arrives (§5).
+    // only once LOCK drops and the final COMPLETE arrives (ï¿½5).
     assign genuine_complete = genuine_raw && !lock_now;
 
-    // ---- advance qualification (§2/§3a/§4) ---------------------------------
+    // ---- advance qualification (ï¿½2/ï¿½3a/ï¿½4) ---------------------------------
     logic tie_ctx;
     logic adv_rr;
     logic adv_tie;

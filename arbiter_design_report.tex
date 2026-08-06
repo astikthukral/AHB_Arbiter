@@ -1,0 +1,694 @@
+% =============================================================================
+%  arbiter_design_report.tex
+%
+%  Compile with:  pdflatex arbiter_design_report.tex   (run twice for the ToC)
+%
+%  Packages used are all standard TeX Live / MiKTeX; no external assets.
+% =============================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+
+% ---- signal / identifier macro: avoids escaping every underscore -------------
+\newcommand{\sig}[1]{\texttt{\detokenize{#1}}}
+
+% ---- listings style ---------------------------------------------------------
+\definecolor{cmtgray}{gray}{0.42}
+\definecolor{kwblue}{RGB}{20,60,140}
+\definecolor{bgshade}{gray}{0.97}
+
+\lstdefinestyle{sv}{
+  language=Verilog,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kwblue}\bfseries,
+  commentstyle=\color{cmtgray}\itshape,
+  backgroundcolor=\color{bgshade},
+  frame=single,
+  rulecolor=\color{gray!40},
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  xleftmargin=6pt,
+  framexleftmargin=6pt,
+  morekeywords={logic,always_ff,always_comb,localparam,generate,endgenerate,
+                genvar,assign,typedef,enum,unique,posedge,negedge,parameter}
+}
+\lstset{style=sv}
+
+% ---- headers ----------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small AMBA Arbiter --- Design \& Timing Closure Report}
+\rhead{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\vspace{-1.5cm}\textbf{An AMBA-Style Four-Master Bus Arbiter}\\[4pt]
+       \large Design, Verification, and Timing Closure\\[2pt]
+       \normalsize From $-12.426$\,ns WNS to a Board-Ready Bitstream}
+\author{Astik Thukral}
+\date{\today}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent
+This report documents a synthesisable SystemVerilog bus arbiter for four AMBA-style
+masters, combining round-robin selection, static priority, nested tie-breaking,
+absolute lock override, and recovery from abandoned grants. It describes the
+signal flow and the mechanism behind each behavioural claim, then gives a
+detailed account of the timing-closure effort: the reported Worst Negative Slack
+moved from $-12.426$\,ns with eleven failing endpoints to a fully constrained,
+timing-met implementation at $+1.610$\,ns. The most useful finding was that
+roughly 95\,\% of the original violation had nothing to do with the arbiter's
+logic. The report closes with the engineering practices that made that
+diagnosis possible.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+% =============================================================================
+\section{Overview and Signal Flow}
+% =============================================================================
+
+The arbiter grants a shared bus to one of four masters. Its parameters are
+\sig{NUM_MASTERS}~$=4$, \sig{PRI_WIDTH}~$=3$ (priority values $0\ldots7$), and
+\sig{GRACE_W}~$=4$ (the abandoned-grant window, in cycles).
+
+\subsection{Interface}
+
+\begin{center}
+\begin{tabular}{@{}llp{8.6cm}@{}}
+\toprule
+\textbf{Signal} & \textbf{Dir / Width} & \textbf{Meaning} \\
+\midrule
+\sig{clk}          & in, 1  & System clock, 100\,MHz \\
+\sig{rst_n}        & in, 1  & Active-low reset; asynchronous assertion \\
+\sig{REQ}          & in, 4  & Master $i$ is requesting the bus \\
+\sig{PRI}          & in, 12 & Packed priorities; master $i$ occupies \sig{PRI[i*3 +: 3]} \\
+\sig{LOCK}         & in, 4  & Master $i$ requests an atomic multi-beat hold \\
+\sig{VALID_XFER}   & in, 4  & Master $i$ has actually begun its transfer \\
+\sig{COMPLETE}     & in, 4  & Master $i$ has finished its transfer \\
+\midrule
+\sig{GRANT}        & out, 4 & One-hot grant \\
+\sig{slot_complete}& out, 1 & The shared completion handshake (observability) \\
+\sig{slot_type}    & out, 1 & 0 = round-robin slot, 1 = priority slot \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Data flow through one arbitration}
+
+The design is entirely combinational from \sig{REQ}/\sig{PRI} to \sig{GRANT};
+all state advances only on completion.
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=3pt]
+\item \textbf{Round-robin candidate.} \sig{rr_pointer_unit} feeds the live
+      \sig{REQ} vector and its pointer \sig{rr_ptr} into a shared
+      \sig{rotate_mask_encoder}, which rotates the vector so that \sig{rr_ptr}
+      maps to index~0, priority-encodes lowest-index-wins, and rotates the
+      single result bit back. The output \sig{rr_grant} is the closest
+      requester at or after the pointer in cyclic order.
+
+\item \textbf{Priority candidate.} \sig{priority_comparator} evaluates
+      \emph{requesting masters only} through a balanced
+      $O(\log_2 N)$-deep pairwise reduction tree. Each node carries
+      $(\textit{req}, \textit{pri}, \textit{mask})$ for its subrange; merging
+      keeps the higher-priority side outright, or unions the two masks on an
+      exact tie. The root yields \sig{tied_mask} --- the set of requesters
+      holding the maximum priority --- and \sig{is_tie}.
+
+\item \textbf{Tie resolution.} \sig{tie_break_rr_unit} runs a
+      \emph{second, independent} \sig{rotate_mask_encoder} over
+      \sig{tied_mask} using its own pointer \sig{tie_ptr}, producing
+      \sig{tie_grant}.
+
+\item \textbf{Slot selection.} \sig{slot_type} chooses between the two
+      candidates:
+      \sig{arb_grant = (slot_type == RR) ? rr_grant : tie_grant}.
+
+\item \textbf{Lock override.} \sig{lock_ctrl} forces the grant to a latched
+      holder whenever a lock is engaged:
+      \sig{eff_grant = locked ? lock_grant_vec : arb_grant}.
+      This has absolute precedence over both pointers and over priority.
+
+\item \textbf{Completion.} \sig{genuine_complete} is the granted master's
+      \sig{COMPLETE}, suppressed while that master still asserts \sig{LOCK}.
+      \sig{grace_window_timer} independently asserts \sig{forced_complete} if a
+      granted master never asserts \sig{VALID_XFER} within \sig{GRACE_W} cycles.
+      \sig{completion_merge} ORs the two into the single signal
+      \sig{slot_complete}.
+
+\item \textbf{State advance.} On \sig{slot_complete} --- and only then --- the
+      granting pointer advances, \sig{slot_type} toggles, any lock releases,
+      and the grace counter resets.
+\end{enumerate}
+
+\begin{center}
+\ttfamily\small
+\begin{tabular}{@{}l@{}}
+REQ ----+--> rr\_pointer\_unit ---> rr\_grant ----+ \\
+~~~~~~~~|                                         | \\
+~~~~~~~~+--> priority\_comparator --> tied\_mask   | \\
+PRI ----+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~|~~~~~~~~ | \\
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~v~~~~~~~~ | \\
+~~~~~~~~~~~~~~~~~~~~~~~~~~~ tie\_break\_rr\_unit --+--> [slot\_type mux] \\
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~|          \\
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~v          \\
+LOCK --> lock\_ctrl -------------------------> [lock override] --> GRANT \\
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~|          \\
+COMPLETE / VALID\_XFER --> grace\_window\_timer --+-> completion\_merge     \\
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~v                \\
+~~~~~~~~~~~~~~~~~~~~ slot\_complete --> pointers, slot\_type, lock, grace \\
+\end{tabular}
+\end{center}
+
+% =============================================================================
+\section{How Each Claim Is Achieved}
+% =============================================================================
+
+\subsection{Fairness: round-robin without bias}
+
+\sig{rotate_mask_encoder} is written once and instantiated twice, so the main
+pointer and the tie-break pointer are structurally identical by construction.
+Rotation uses modulo arithmetic on indices rather than bit shifts, so the design
+remains correct for any \sig{NUM_MASTERS}, not only powers of two.
+
+A pointer advances \emph{past the actual winner}, not merely by incrementing
+itself. With a sparse request vector the winning index can differ from the
+pointer, and incrementing the pointer alone could park it back on the same
+master:
+
+\begin{lstlisting}
+rr_ptr <= (winner_idx == NUM_MASTERS-1) ? '0 : winner_idx + 1'b1;
+\end{lstlisting}
+
+\subsection{Priority without starvation}
+
+Static priority alone starves low-priority masters indefinitely.
+\sig{slot_alternation_ctrl} holds a single bit that toggles
+$\text{RR}\rightarrow\text{PRIORITY}\rightarrow\text{RR}$ on every
+\sig{slot_complete}, independently of which master either pointer selects.
+
+Because round-robin slots occur every second slot, and \sig{rr_ptr} cycles
+through all $N$ masters, every requesting master is guaranteed a slot within
+$2N$ slots --- eight, for four masters --- \emph{regardless of how badly it
+loses on priority}. With priorities $\{7,1,1,1\}$ and all four requesting, the
+observed pattern is
+
+\begin{center}\ttfamily
+M0,\ M3,\ M1,\ M3,\ M2,\ M3,\ M3,\ M3,\ M0,\ \ldots
+\end{center}
+
+\noindent
+M3 takes five of every eight slots; M0, M1 and M2 each take one. None
+disappears.
+
+\subsection{Tie-breaking within the maximum set}
+
+When several requesters share the maximum priority, \sig{tied_mask} is a strict
+subset of the request vector, and \sig{tie_ptr} rotates \emph{within that subset
+only}. Masters below the maximum reach the bus solely on round-robin slots.
+The tie pointer is left untouched when a unique maximum exists, preserving the
+state independence the specification relies on.
+
+\subsection{Lock: atomic multi-beat sequences}
+
+\sig{lock_ctrl} engages when the effective granted master asserts \sig{LOCK} and
+the slot is not already completing. While held:
+
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+\item \sig{lock_grant_vec} forces \sig{GRANT} to the holder, so no
+      re-arbitration occurs from any source, including a higher-priority
+      requester arriving mid-lock;
+\item \sig{freeze} holds \sig{slot_alternation_ctrl}, so the entire sequence
+      consumes exactly one slot;
+\item \sig{genuine_complete} is suppressed, so intermediate beats do not end the
+      slot. The sequence ends only when \sig{LOCK} drops and \sig{COMPLETE}
+      arrives.
+\end{itemize}
+
+Release occurs only on \sig{slot_complete}. Because the engagement path runs
+only while \sig{lock_held == 0}, a master leaving lock cannot re-engage in the
+same cycle: it must win the next slot fairly. This is the ``no privileged
+re-entry'' rule.
+
+\subsection{Abandoned-grant recovery}
+
+\sig{grace_window_timer} is gated on \sig{VALID_XFER}, not on \sig{LOCK}. Once a
+grant is issued, a fixed \sig{GRACE_W}-cycle window opens:
+
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+\item if \sig{VALID_XFER} asserts within the window, \sig{started} latches
+      permanently and the check disengages --- a slow but real transfer is never
+      truncated;
+\item if it does not, \sig{forced_complete} pulses and the slot advances exactly
+      as on a normal completion.
+\end{itemize}
+
+\subsection{One definition of completion}
+
+\sig{completion_merge} is deliberately the only place ``a slot ended'' is
+defined:
+
+\begin{lstlisting}
+assign slot_complete = genuine_complete | forced_complete;
+\end{lstlisting}
+
+Both pointers, the alternation counter, the lock controller and the grace timer
+key off exactly this signal. There is therefore no way for the lock to release
+on a cycle where the pointer did not advance --- a class of fairness bug that
+independent per-block completion logic would permit.
+
+% =============================================================================
+\section{Known Limitations}
+% =============================================================================
+
+Stating these precisely is part of the design, not an admission against it.
+
+\paragraph{Turn-based, not time-based.}
+The guarantee bounds the \emph{number of slots} a master waits, not wall-clock
+latency. If the bus owner's transfer takes $T$ cycles, everyone else waits
+proportionally. Turn fairness is not bandwidth fairness: with priorities
+$\{7,1,1,1\}$ and a dominant master whose transfers are $10^6$ cycles against
+others' 10 cycles, M3 receives five of eight \emph{turns} but 99.9994\,\% of the
+\emph{bandwidth}. Production interconnect adds bandwidth regulation for exactly
+this reason. In practice AHB bounds burst length to sixteen beats, which is what
+makes turn-based fairness sufficient.
+
+\paragraph{An indefinitely held lock starves everyone.}
+If a master asserts \sig{LOCK} and never releases it, \sig{genuine_complete}
+stays suppressed, \sig{slot_complete} never fires, and the bus is held forever.
+This is starvation in the strict sense. A lock timeout is the single
+highest-value addition the design could take.
+
+\paragraph{A started-but-never-completed transfer hangs the arbiter.}
+\sig{forced_complete} is gated on \sig{!started} by design, so once
+\sig{VALID_XFER} has been seen the grace window can never fire again. The
+arbiter cannot distinguish ``slow'' from ``dead''. Given a choice between
+occasionally hanging and occasionally truncating a live transaction, the design
+chose to hang --- truncation without protocol support corrupts data. Closing
+this needs a transaction watchdog \emph{and} an abort channel to the master,
+which is essentially AHB \textsc{split}/\textsc{retry}. Without the notification
+path, a watchdog alone trades a hang for silent corruption.
+
+\paragraph{Undocumented assumption.}
+The module header states that \sig{REQ}/\sig{PRI} remain stable within a
+transfer. It does not state the load-bearing companion: \emph{a master that
+starts a transfer will finish it}.
+
+% =============================================================================
+\section{Verification}
+% =============================================================================
+
+\subsection{Strategy}
+
+Unit testbenches exist for every submodule, plus an integration bench for the
+arbiter. For the board wrapper, checking is \emph{property-based} rather than
+vector-based: exact grant sequences are brittle against the relative phase of
+the two pointers, whereas properties hold for every legal run and catch classes
+of bug that hand-written vectors miss.
+
+\begin{center}
+\begin{tabular}{@{}llp{7.4cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Property} & \textbf{Catches} \\
+\midrule
+P1 & \sig{GRANT} is one-hot or zero & encoder and mux faults \\
+P2 & never grant a non-requester & request-handling faults (suppressed while
+     locked, where override is correct) \\
+P3 & \sig{COMPLETE} is a single-cycle pulse & a held completion would
+     immediately re-complete the next transfer \\
+P4 & \sig{slot_type} toggles once per \sig{slot_complete}, never otherwise &
+     the alternation contract, in both directions \\
+P5 & \sig{GRANT} is stable within a slot & mid-transfer re-arbitration \\
+-- & every requester served within $2N$ slots & \textbf{the design's headline
+     fairness guarantee, checked directly} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The starvation checker is the important one: it runs continuously across every
+scenario rather than as a spot check, so any fairness regression anywhere in the
+run is caught.
+
+\subsection{Scenarios}
+
+Nine scenarios: the four priority-preset demonstrations; lock; abandonment;
+single-step mode; and request stability under a mid-transfer input change.
+Two deserve comment.
+
+\emph{Abandonment} carries no explicit assertion and needs none --- if the grace
+window fails to fire, the wait for further slots never returns and the watchdog
+trips. The hang \emph{is} the failure signal.
+
+\emph{Button press} models mechanical bounce on both press and release. Without
+it the debounce logic is never exercised and one would merely be testing a wire.
+
+\subsection{Results}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Bench} & \textbf{Level} & \textbf{Slots} & \textbf{Result} \\
+\midrule
+\sig{tb_amba_arbiter_top}                & RTL, arbiter core   & --- & pass \\
+\sig{tb_amba_arbiter_demo_top}           & RTL, full wrapper   & 88  & 0 errors \\
+\sig{tb_amba_arbiter_demo_top_postimpl}  & implemented netlist & 88  & 0 errors \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The post-implementation run matched the RTL run \emph{slot for slot} across all
+88 transactions, confirming that synthesis and implementation preserved
+behaviour exactly.
+
+\subsection{Two testbench techniques worth recording}
+
+\paragraph{Parameterise for simulation.}
+\sig{TICK_DIV} and \sig{DEBOUNCE_CYCLES} are \sig{parameter}, not
+\sig{localparam}, purely so a testbench can shrink them. At hardware values one
+transaction spans $5\times10^7$ cycles; at simulation values, twenty.
+
+\paragraph{Netlist simulation needs a port-only bench.}
+Synthesis renames, merges and absorbs internal nets, so hierarchical references
+fail to bind:
+\begin{lstlisting}
+ERROR: [VRFC 10-2991] 'grant' is not declared under prefix 'dut'
+\end{lstlisting}
+Parameters also cannot be overridden in a netlist --- the values are baked into
+the gates at synthesis time, so the netlist must be \emph{built} small via
+synthesis generics. The port-only bench recovers slot boundaries from
+\sig{slot_type} toggling on the LED outputs, since one toggle is exactly one
+completed slot.
+
+% =============================================================================
+\section{The Timing-Closure Effort}
+% =============================================================================
+
+\subsection{The starting point}
+
+The first routed report on \sig{xc7a100tcsg324-1}:
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+& \textbf{WNS} & \textbf{TNS} & \textbf{Failing endpoints} \\
+\midrule
+Setup & $-12.426$\,ns & $-65.627$\,ns & 11 of 30 \\
+Hold  & $+0.076$\,ns  & $0.000$\,ns   & 0 of 30 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For an arbiter serving four masters --- 84 LUTs and 19 flip-flops --- this is an
+implausible result, and that implausibility was the first useful signal.
+
+\subsection{Diagnosis: read the paths, not the summary}
+
+Every one of the eleven failing endpoints touched a package pin. \textbf{There
+was not a single flip-flop-to-flip-flop setup violation in the design.}
+
+The decisive path had one logic level:
+
+\begin{center}
+\begin{tabular}{@{}llrl@{}}
+\toprule
+\textbf{Source} & \textbf{Destination} & \textbf{Slack} & \textbf{Levels} \\
+\midrule
+\sig{PRI[2]} & \sig{slot_complete} & $-12.426$ & 10 (IBUF + 8 LUT + OBUF) \\
+\sig{u_sa/slot_type_reg/C} & \sig{slot_type} & $-5.630$ & \textbf{1 (OBUF only)} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A path containing an output buffer and \emph{no logic at all} missed by
+5.63\,ns. No amount of RTL restructuring can fix that, which located the problem
+outside the design.
+
+\subsection{Root cause 1: an unsurvivable I/O budget}
+
+The constraint file used placeholder budgets of 40\,\% of the period in each
+direction:
+\[
+10.000 - 4.000_{\text{in}} - 4.000_{\text{out}} - 0.035_{\text{unc}}
+  = 1.965\ \text{ns available inside the chip.}
+\]
+The fixed buffer costs on a $-1$ speed grade part are
+$\text{IBUF}\approx1.00$\,ns and $\text{OBUF}\approx2.64$\,ns, totalling
+3.64\,ns \emph{before a single LUT is placed}. A pad-to-pad path was over budget
+by 1.7\,ns with zero logic in it.
+
+The arbiter's own contribution to the 18.39\,ns arrival time was
+$8 \times 0.124 = 0.99$\,ns --- about 5\,\%.
+
+\subsection{Root cause 2: a pblock that never applied}
+
+A placement region had been added on the theory that spread placement was
+inflating routing. The implementation log showed it had been silently rewritten:
+
+\begin{lstlisting}
+INFO: [Vivado 12-3520] Assignment of '...' to a pblock 'pblock_arbiter'
+means that all children of 'u_sa, u_gr, u_lk, u_rr, and u_tb' are in the
+pblock. Changing the pblock assignment to 'u_sa, u_gr, u_lk, u_rr, u_tb'.
+\end{lstlisting}
+
+The cell list came from
+\sig{[get_cells -hierarchical -filter {PRIMITIVE_LEVEL==LEAF}]}, which swept up
+all 36 IBUF/OBUF cells and the BUFG. Those cannot be placed in a SLICE-only
+range, so the region became unsatisfiable. The placed result landed at
+\sig{SLICE_X0Y26..X3Y50} --- entirely outside the requested
+\sig{SLICE_X0Y0:SLICE_X9Y19} --- with routing still at 67--80\,\% of path delay.
+
+\textbf{Lesson: a constraint that produces no error is not necessarily a
+constraint that took effect.} Only the log revealed it.
+
+\subsection{Root cause 3: the wrong abstraction}
+
+An arbiter is not a chip. Its \sig{REQ}/\sig{GRANT}/\sig{PRI} wires connect to
+master IP inside the same fabric and never touch a package pin. Timing it
+pad-to-pad measured the Artix-7 I/O ring, not the design.
+
+A related asymmetry compounded it: the clock reached the flip-flops through
+IBUF~$+$~BUFG with \textbf{4.573\,ns of insertion delay}, and on a
+flip-flop-to-port path that delay is charged entirely to the launch side with
+nothing on the capture side to compensate. That alone accounts for the failing
+\sig{slot_type} path.
+
+\subsection{Root cause 4: 36 unconstrained I/O}
+
+With no \sig{PACKAGE_PIN} constraints, Vivado auto-assigned all pins around the
+die perimeter, and the placer dragged 84 LUTs across 25 CLB rows to reach them.
+Per-hop routing rose to 0.5--1.5\,ns against a typical 0.1--0.3\,ns.
+
+\subsection{Two RTL findings}
+
+\paragraph{A redundant multiplexer (14 LUTs, one logic level).}
+The priority-slot grant selected between two candidates:
+\begin{lstlisting}
+assign prio_grant = is_tie ? tie_grant : direct_grant;
+\end{lstlisting}
+But \sig{rotate_mask_encoder} returns the single set bit of a \emph{one-hot}
+mask for \emph{any} pointer value --- it rotates that lone bit somewhere,
+priority-encodes it as the only candidate, and rotates it back where it started.
+So on the unique-maximum case, where \sig{tied_mask} is already one-hot,
+\sig{tie_grant} was computing exactly the vector \sig{direct_grant} did. The
+entire selection was redundant:
+\begin{lstlisting}
+assign prio_grant = tie_grant;
+\end{lstlisting}
+This removed the multiplexer, \sig{unique_valid}, \sig{direct_grant_vec} and two
+\sig{\$countones} reductions: $-14$ LUTs ($-17\,\%$) and one logic level.
+Simulation results were bit-identical, confirming the equivalence argument
+empirically.
+
+\paragraph{A cheaper tie test.}
+\sig{\$countones(tied_mask) >= 2} was replaced by
+\sig{|(tied_mask \& (tied_mask - 1))}. At $N=4$ this changed neither logic depth
+nor LUT count --- Vivado had already folded the population count --- but it
+altered LUT packing enough to gain $0.225$\,ns. Re-running the identical design
+produced a byte-identical result, proving the gain was reproducible rather than
+placement noise. The rewrite is retained because it scales; the credit belongs
+to packing, not to depth.
+
+\subsection{The decisive measurement: logic versus routing}
+
+Every critical path in this design sits at 13--15\,\% logic and 85--87\,\%
+routing:
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Path (OOC, post-optimisation)} & \textbf{Total} & \textbf{Logic} & \textbf{Route} \\
+\midrule
+\sig{PRI[10]} $\rightarrow$ \sig{slot_complete} & 7.544\,ns & 0.992\,ns (13.2\,\%) & 6.552\,ns (86.9\,\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+That ratio is the single most diagnostic number in the whole effort. It predicted
+what happened next: removing a full LUT level bought only $0.033$\,ns, because
+the router handed most of it straight back as extra wire delay. \textbf{Deleting
+every LUT on the path would recover under 1\,ns.} Further logic optimisation had
+nowhere to go, and the correct response was to stop.
+
+\subsection{The progression}
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Stage} & \textbf{WNS} & \textbf{TNS} & \textbf{Failing} & \textbf{LUTs} \\
+\midrule
+Original (4\,ns I/O budgets, pblock)      & $-12.426$ & $-65.627$ & 11 / 30 & 84 \\
+I/O max $4\rightarrow1$\,ns, pblock removed & $-5.192$ & $-22.256$ & 6 / 30  & 84 \\
+Out-of-context (no IBUF/OBUF/BUFG)        & $+0.115$  & $0.000$   & 0 / 30  & 83 \\
+\quad + cheaper \sig{is_tie}              & $+0.340$  & $0.000$   & 0 / 30  & 83 \\
+\quad + redundant mux removed             & $+0.373$  & $0.000$   & 0 / 30  & \textbf{69} \\
+Ported to \sig{xc7a35tcpg236-1}           & $+0.421$  & $0.000$   & 0 / 30  & 67 \\
+\midrule
+Board wrapper, pad level, fully constrained & $\mathbf{+1.610}$ & $\mathbf{0.000}$ & \textbf{0 / 277} & 168 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Why the final number is larger, and legitimate}
+
+The last row is not the same measurement made kinder. The arbiter was wrapped in
+a board-level design containing a reset synchroniser, an input synchroniser, a
+behavioural master model, a priority-table selector, a tick generator, a
+debouncer and a display stage. The arbiter's \sig{REQ}/\sig{GRANT} interface
+became \emph{internal}, which is what it will always be in a real system, and
+the only signals reaching pins are switches, buttons and LEDs --- each one
+flip-flop away from its pad.
+
+That is not a workaround. It is the correct topology for the block, and it is
+why the pad-to-pad and clock-insertion problems disappear rather than being
+suppressed.
+
+Final state: \textbf{WNS $+1.610$\,ns, hold $+0.122$\,ns, 0 of 277 failing
+endpoints}, implied $F_{\max}\approx119$\,MHz, zero DRC violations, 320 of 320
+nets routed, bitstream generated cleanly.
+
+% =============================================================================
+\section{Practices That Made the Difference}
+% =============================================================================
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=5pt]
+
+\item \textbf{Read individual paths, not the summary.} ``WNS $=-12.4$\,ns''
+      says nothing about cause. The \sig{Source}/\sig{Destination} fields
+      classify a path as port-to-port, port-to-flop, flop-to-port or
+      flop-to-flop --- and that classification immediately showed the fault lay
+      outside the logic.
+
+\item \textbf{Read the implementation log.} The pblock failure produced no
+      error and no warning. It appeared only as an \sig{INFO} line explaining
+      that Vivado had rewritten the constraint. A clean run is not a correct
+      run.
+
+\item \textbf{Use the logic/route split as the stopping criterion.} At 87\,\%
+      routing, logic optimisation is nearly futile. Knowing when to stop
+      optimising is worth as much as knowing how to start.
+
+\item \textbf{Make falsifiable predictions before each run.} Each change was
+      preceded by an explicit prediction of the resulting WNS and failing
+      endpoint count. When a prediction held, confidence in the model was
+      earned rather than assumed.
+
+\item \textbf{Take failed predictions seriously.} One prediction --- that a
+      path containing no LUTs could not change --- was wrong: its \emph{routing}
+      changed because a smaller netlist placed differently. The logic delay was
+      indeed identical to three decimals, but the conclusion drawn from it was
+      too strong. Recording this is more useful than recording the successes.
+
+\item \textbf{Change one variable at a time.} Constraints, then abstraction,
+      then RTL. Comparing an OOC result before a change against a pad-level
+      result after it would have attributed the delta to the wrong cause.
+
+\item \textbf{Test the noise hypothesis before believing it.} A $0.225$\,ns gain
+      was initially dismissed as placement variance. Re-running the unchanged
+      design produced a byte-identical result, proving the tool deterministic
+      and the gain real.
+
+\item \textbf{Choose the abstraction that matches the object.} Out-of-context
+      synthesis is not a way to make numbers look better; it is the correct
+      model for a block that will be integrated, and the pad-level run was the
+      inaccurate one.
+
+\item \textbf{Simulate before touching hardware.} Debugging a tick generator, a
+      priority latch, a debouncer and a four-instance FSM through four LEDs is
+      far slower than debugging them in a waveform.
+
+\item \textbf{Prefer properties to vectors.} ``Every requesting master is served
+      within $2N$ slots'' is checkable continuously across every scenario and
+      survives changes in pointer phase; a hand-written expected sequence does
+      neither.
+
+\item \textbf{Synchronise every asynchronous input, but debounce only edges.}
+      Metastability affects all asynchronous inputs; bounce only matters where a
+      transition carries meaning. Conflating the two produces either missing
+      synchronisers or unnecessary logic.
+
+\item \textbf{Honour the module's stated contract at its boundary.} The arbiter
+      requires \sig{REQ}/\sig{PRI} stable within a transfer, so the wrapper
+      latches the priority selector at slot boundaries and the master model
+      holds \sig{REQ} until completion. A raw switch would have violated the
+      contract silently.
+
+\item \textbf{State limitations precisely.} ``Starvation-free in slot count;
+      latency bounded only under bounded transfer length; an indefinitely held
+      lock is unbounded'' is a stronger position than an unqualified claim of
+      fairness.
+
+\end{enumerate}
+
+% =============================================================================
+\section{Summary}
+% =============================================================================
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Item} & \textbf{Status} \\
+\midrule
+Arbiter core, out-of-context timing & $+0.421$\,ns WNS, 67 LUTs, 19 FF \\
+RTL simulation (wrapper)            & 88 slots, 9 scenarios, 0 errors \\
+Post-implementation simulation      & 88 slots, netlist matches RTL exactly \\
+Implementation (board wrapper)      & $+1.610$\,ns WNS, 0 / 277 failing \\
+Hold                                & $+0.122$\,ns, 0 / 277 failing \\
+DRC / routing                       & 0 violations; 320 / 320 nets routed \\
+Bitstream                           & generated, 0 warnings \\
+Hardware validation                 & outstanding --- requires the board \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\bigskip\noindent
+The defensible claim is therefore: \emph{an AMBA-style four-master arbiter with
+round-robin and priority slot alternation, nested tie-breaking, lock override
+and abandoned-grant recovery; verified in RTL and post-implementation
+simulation; timing-closed at 100\,MHz with 1.61\,ns of margin; fully constrained
+for the target board; bitstream generated. Not yet run on hardware.}
+
+\medskip\noindent
+Every clause is backed by a report. The more instructive half of the work,
+however, was the diagnosis: roughly 95\,\% of an apparently catastrophic
+$-12.4$\,ns violation belonged to the I/O ring and to a placement constraint
+that had silently never applied --- and the arbiter's own logic, all eight
+levels of it, contributed under one nanosecond throughout.
+
+\end{document}
