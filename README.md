@@ -18,7 +18,7 @@ Parameterized for `NUM_MASTERS = 4`, `PRI_WIDTH = 3`, `GRACE_W = 4`. Target part
 | Bitstream | generated, 0 warnings |
 | Hardware validation | outstanding — requires the board |
 
-Timing closure took WNS from **−12.426 ns / 11 failing endpoints** to the figures above. The full account is in [`arbiter_design_report.tex`](arbiter_design_report.tex).
+Timing closure took WNS from **−12.426 ns / 11 failing endpoints** to the figures above. 
 
 ---
 
