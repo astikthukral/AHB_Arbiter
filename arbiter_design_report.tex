@@ -672,7 +672,7 @@ Implementation (board wrapper)      & $+1.610$\,ns WNS, 0 / 277 failing \\
 Hold                                & $+0.122$\,ns, 0 / 277 failing \\
 DRC / routing                       & 0 violations; 320 / 320 nets routed \\
 Bitstream                           & generated, 0 warnings \\
-Hardware validation                 & outstanding --- requires the board \\
+Hardware validation                 & \textbf{validated on Basys 3} (\sig{xc7a35t}) \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -681,8 +681,24 @@ Hardware validation                 & outstanding --- requires the board \\
 The defensible claim is therefore: \emph{an AMBA-style four-master arbiter with
 round-robin and priority slot alternation, nested tie-breaking, lock override
 and abandoned-grant recovery; verified in RTL and post-implementation
-simulation; timing-closed at 100\,MHz with 1.61\,ns of margin; fully constrained
-for the target board; bitstream generated. Not yet run on hardware.}
+simulation; timing-closed at 100\,MHz with 1.61\,ns of margin; and validated on
+hardware on a Basys 3 (\sig{xc7a35tcpg236-1}), where every documented behaviour
+--- round-robin rotation, priority preemption, tie-break rotation within the
+tied subset, lock hold with frozen alternation, and grace-window recovery from
+an abandoned grant --- was observed on the board.}
+
+\medskip\noindent
+Board testing also produced a result worth recording, because it initially
+looked like a fault. With all priorities equal and all four masters requesting,
+the observed grant order was \texttt{M0 M3 M1 M0 M2 M1 M3 M2 \ldots}, which is
+plainly not a single round-robin cycle. Separating it by \sig{slot_type} resolves
+it: the round-robin slots ran \texttt{M0 M1 M2 M3 M0 M1 M2} and the priority
+slots ran \texttt{M3 M0 M1 M2 M3 M0} --- two strict cycles, interleaved, offset
+by three. The offset is itself evidence of correctness: \sig{tie_ptr} advances
+only when a tie was actually resolved, so running an earlier preset with a
+unique maximum left it stationary while \sig{rr_ptr} continued. That is exactly
+the state-independence the specification requires, and it is visible from the
+outside only if one remembers there are two pointers rather than one.
 
 \medskip\noindent
 Every clause is backed by a report. The more instructive half of the work,

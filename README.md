@@ -16,7 +16,7 @@ Parameterized for `NUM_MASTERS = 4`, `PRI_WIDTH = 3`, `GRACE_W = 4`. Target part
 | RTL simulation | 88 slots, 9 scenarios, 0 errors |
 | Post-implementation simulation | 88 slots, netlist matches RTL slot for slot |
 | Bitstream | generated, 0 warnings |
-| Hardware validation | outstanding — requires the board |
+| Hardware validation | **validated on Basys 3** — all nine bring-up steps behave as designed |
 
 Timing closure took WNS from **−12.426 ns / 11 failing endpoints** to the figures above. 
 
@@ -183,7 +183,9 @@ Its ports are **board resources only** — `clk`, `btnC`, `btnU`, `sw[15:0]`, `l
 
 ### Demonstrations
 
-1. **Round-robin fairness** — preset `00`, all requesting. Both pointers advance in lockstep, giving `M0,M0,M1,M1,M2,M2,M3,M3`.
+1. **Round-robin fairness** — preset `00`, all requesting. From a fresh reset both pointers start at 0 and advance in lockstep, giving `M0,M0,M1,M1,M2,M2,M3,M3`.
+
+   If you reach this preset *after* running `01` or `11`, the sequence will look irregular — e.g. `M0 M3 M1 M0 M2 M1 M3 M2`. **This is correct.** Separate it by `LD4` (`slot_type`) and each half is a strict cycle: RR slots give `M0,M1,M2,M3,…` and priority slots give the same cycle at a different phase. `tie_ptr` advances *only when a tie is actually resolved*, so a preset with a unique maximum leaves it stationary while `rr_ptr` keeps moving — the two drift apart by design. Press `BTNC` to realign them.
 2. **Priority ordering** — preset `01`, all requesting. M3 takes every priority slot; RR slots rotate.
 3. **Starvation prevention** — preset `11`, all requesting. M3 outranks the others 7-to-1 and takes five of every eight slots, yet M0–M2 **never disappear**. Then drop `sw[3]` and watch the remaining three fall into tie-break rotation.
 4. **Tie-break rotation** — preset `10`. M3/M2 alternate on priority slots while M1/M0 appear only on RR slots.
