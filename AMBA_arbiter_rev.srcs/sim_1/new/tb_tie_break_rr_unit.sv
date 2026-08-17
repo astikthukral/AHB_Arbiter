@@ -20,7 +20,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 // -----------------------------------------------------------------------------
-// tb_tie_break_rr_unit — self-checking testbench for tie_break_rr_unit (§3a)
+// tb_tie_break_rr_unit ï¿½ self-checking testbench for tie_break_rr_unit (ï¿½3a)
 // Requires: tie_break_rr_unit.sv, rotate_mask_encoder.sv
 // -----------------------------------------------------------------------------
 `timescale 1ns/1ps
@@ -63,19 +63,19 @@ module tb_tie_break_rr_unit;
 
         // Resolve the tie (advance) -> pointer moves one position.
         advance = 1; @(negedge clk); advance = 0;
-        chk("ptr -> 1",            ptr == 1);
+        chk("ptr -> 2",            ptr == 2);
         @(negedge clk);
-        chk("tie pick m3 @ptr1",   grant_vec == 4'b1000);  // nearest at/after 1 is m3
+        chk("tie pick m3 @ptr2",   grant_vec == 4'b1000);  // nearest at/after 2 is m3
 
         // A master leaving/joining the tied set needs no special handling:
-        // now only m2,m3 tied, pointer at 1 -> nearest is m2.
+        // now only m2,m3 tied, pointer at 2 -> nearest is m2.
         tied_mask = 4'b1100; @(negedge clk);
         chk("mask change: pick m2", grant_vec == 4'b0100);
 
         // Unique winner (mask one-hot) leaves pointer untouched when advance held low.
         tied_mask = 4'b0001; advance = 0; @(negedge clk);
         chk("one-hot mask pick m0", grant_vec == 4'b0001);
-        chk("ptr unchanged (=1)",   ptr == 1);
+        chk("ptr unchanged (=2)",   ptr == 2);
 
         // Empty tied set -> not valid, no grant.
         tied_mask = 4'b0000; @(negedge clk);
