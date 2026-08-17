@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [new1, main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testbenches:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # file:top-module pairs. Icarus Verilog can't compile this RTL
+        # (rotate_mask_encoder.sv uses `break` inside always_comb, which
+        # Icarus doesn't support) — Verilator is used instead.
+        #
+        # tb_amba_arbiter_demo_top_postimpl.sv is intentionally excluded:
+        # it needs Vivado's UNISIM/glbl libraries to elaborate the
+        # post-implementation netlist, which requires an actual Vivado
+        # install/license. Run that one locally or on a self-hosted
+        # runner with Vivado, not here.
+        tb:
+          - { file: "tb_amba_arbiter_top.sv",          top: "tb_amba_arbiter_top" }
+          - { file: "tb_amba_arbiter_demo_top.sv",      top: "tb_amba_arbiter_demo_top" }
+          - { file: "tb_completion_merge.sv",           top: "tb_completion_merge" }
+          - { file: "tb_grace_window_timer.sv",         top: "tb_grace_window_timer" }
+          - { file: "tb_lock_ctrl.sv",                  top: "tb_lock_ctrl" }
+          - { file: "tb_priority_comparator.sv",        top: "tb_priority_comparator" }
+          - { file: "tb_rr_pointer_unit.sv",             top: "tb_rr_pointer_unit" }
+          - { file: "tb_slot_alternation_ctrl.sv",      top: "tb_slot_alternation_ctrl" }
+          # NOTE: currently fails — ptr==2 vs the assertion's expected
+          # ptr==1 in tie_break_rr_unit.sv's advance logic. Fix the RTL
+          # or the assertion, then drop this comment.
+          - { file: "tb_tie_break_rr_unit.sv",          top: "tb_tie_break_rr_unit" }
+          - { file: "rotate_mask_encoder_tb.sv",        top: "tb_rotate_mask_encoder" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Verilator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y verilator
+
+      - name: Compile and run ${{ matrix.tb.top }}
+        run: |
+          SRC="AMBA_arbiter_rev.srcs/sources_1/new"
+          SIM="AMBA_arbiter_rev.srcs/sim_1/new"
+          verilator --binary --timing -Wno-fatal \
+            --top-module ${{ matrix.tb.top }} \
+            -Mdir /tmp/${{ matrix.tb.top }} \
+            "$SIM/${{ matrix.tb.file }}" "$SRC"/*.sv
+          /tmp/${{ matrix.tb.top }}/V${{ matrix.tb.top }}
+
+  # Single required check — point branch protection at this job, not at
+  # the individual matrix legs, so a silently skipped leg still blocks.
+  ci-gate:
+    if: always()
+    needs: [testbenches]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all testbenches passed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "One or more testbenches did not pass."
+          exit 1
